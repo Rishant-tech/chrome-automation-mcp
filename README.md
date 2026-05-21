@@ -45,6 +45,38 @@ If you prefer to run from source during development:
 codex mcp add chrome-automation -- bash -lc 'cd /absolute/path/to/chrome-automation-mcp && go run .'
 ```
 
+## Example Commands
+
+These are the same command shapes used during real browser sessions.
+
+### Open LinkedIn in Chrome
+
+```bash
+open -a "/Applications/Google Chrome.app" "https://www.linkedin.com/"
+```
+
+### Open your LinkedIn profile in Chrome
+
+```bash
+open -a "/Applications/Google Chrome.app" "https://www.linkedin.com/in/me/"
+```
+
+### Open your LinkedIn Jobs page in Chrome
+
+```bash
+open -a "/Applications/Google Chrome.app" "https://www.linkedin.com/jobs/"
+```
+
+### Use the MCP browser tools
+
+```text
+browser_open_url https://www.linkedin.com/in/rishant-rajpoot-608ba51a3/?isSelfProfile=true
+browser_search google.com
+browser_open_url https://www.linkedin.com/jobs/
+browser_status
+browser_start
+```
+
 ## Notes
 
 - `browser_open_url` is the most reliable tool when you want Chrome to open a page and return the visible content to the client.
