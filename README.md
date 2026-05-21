@@ -33,10 +33,13 @@ go build -o chrome-automation-mcp .
 
 ## Add to Codex CLI
 
-If you are running the server locally, add it as a stdio MCP server:
+Clone the repo and register it with Codex CLI:
 
 ```bash
-codex mcp add chrome-automation -- /absolute/path/to/chrome-automation-mcp/chrome-automation-mcp
+git clone https://github.com/Rishant-tech/chrome-automation-mcp.git
+cd chrome-automation-mcp
+go build -o chrome-automation-mcp .
+codex mcp add chrome-automation -- "$(pwd)/chrome-automation-mcp"
 ```
 
 If you prefer to run from source during development:
@@ -45,37 +48,29 @@ If you prefer to run from source during development:
 codex mcp add chrome-automation -- bash -lc 'cd /absolute/path/to/chrome-automation-mcp && go run .'
 ```
 
-## Example Commands
+## Sample Prompts
 
-These are the same command shapes used during real browser sessions.
+These are example natural-language prompts and the kind of short result you can return.
 
 ### Open LinkedIn in Chrome
 
-```bash
-open -a "/Applications/Google Chrome.app" "https://www.linkedin.com/"
-```
+- Prompt: `use chrome and open linkedin`
+- Response: `LinkedIn opened in Chrome.`
 
-### Open your LinkedIn profile in Chrome
+### Open your LinkedIn profile and check content
 
-```bash
-open -a "/Applications/Google Chrome.app" "https://www.linkedin.com/in/me/"
-```
+- Prompt: `navigate to my profile and check content`
+- Response: `Your profile is visible. The page shows your name, headline, location, current role, and open-to-work status.`
 
-### Open your LinkedIn Jobs page in Chrome
+### Open the Jobs section
 
-```bash
-open -a "/Applications/Google Chrome.app" "https://www.linkedin.com/jobs/"
-```
+- Prompt: `navigate to jobs section`
+- Response: `The Jobs page is open. The page shows the Jobs tab, job tracker, preferences, and suggested job listings.`
 
-### Use the MCP browser tools
+### Search the web
 
-```text
-browser_open_url https://www.linkedin.com/in/rishant-rajpoot-608ba51a3/?isSelfProfile=true
-browser_search google.com
-browser_open_url https://www.linkedin.com/jobs/
-browser_status
-browser_start
-```
+- Prompt: `search google.com`
+- Response: `Google search results are open in Chrome.`
 
 ## Notes
 
