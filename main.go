@@ -211,19 +211,33 @@ func (s *BrowserSession) attachToDebugURL(parent context.Context, debugURL strin
 	return debugURL, nil
 }
 
+func chromeBinaryPath() string {
+	return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+}
+
 func (s *BrowserSession) launchVisibleChrome(parent context.Context) error {
+	if s.chromePath == "" {
+		s.chromePath = chromeBinaryPath()
+	}
+
+	if _, err := os.Stat(s.chromePath); err != nil {
+		return fmt.Errorf("chrome binary not found at %s: %w", s.chromePath, err)
+	}
+
 	args := []string{
-		"-a", "Google Chrome",
-		"--args",
 		fmt.Sprintf("--remote-debugging-port=%d", s.debugPort),
 		fmt.Sprintf("--user-data-dir=%s", s.userDataDir),
 		fmt.Sprintf("--window-size=%d,%d", s.width, s.height),
+		"--new-window",
 		"about:blank",
 	}
-	cmd := exec.CommandContext(parent, "open", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("launch chrome: %w: %s", err, strings.TrimSpace(string(output)))
+	cmd := exec.CommandContext(parent, s.chromePath, args...)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("launch chrome: %w", err)
 	}
+	go func() {
+		_ = cmd.Wait()
+	}()
 
 	deadline := time.Now().Add(30 * time.Second)
 	probeURL := fmt.Sprintf("http://127.0.0.1:%d/json/version", s.debugPort)
