@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -19,7 +20,7 @@ import (
 )
 
 type StartInput struct {
-	Headless        bool   `json:"headless" jsonschema:"launch Chrome headless instead of in a visible window"`
+	Headless        bool   `json:"headless,omitempty" jsonschema:"launch Chrome headless instead of in a visible window"`
 	ChromePath      string `json:"chrome_path,omitempty" jsonschema:"optional path to the Chrome or Chromium executable"`
 	UserDataDir     string `json:"user_data_dir,omitempty" jsonschema:"optional user data directory for the browser profile"`
 	RemoteDebugPort int    `json:"remote_debug_port,omitempty" jsonschema:"port to expose for Chrome remote debugging"`
@@ -51,7 +52,7 @@ type ClickInput struct {
 type TypeInput struct {
 	Selector string `json:"selector" jsonschema:"CSS selector for the target element"`
 	Text     string `json:"text" jsonschema:"text to type into the element"`
-	Clear    bool   `json:"clear" jsonschema:"clear the field before typing"`
+	Clear    bool   `json:"clear,omitempty" jsonschema:"clear the field before typing"`
 }
 
 type WaitInput struct {
@@ -64,7 +65,7 @@ type EvalInput struct {
 }
 
 type ScreenshotInput struct {
-	FullPage bool `json:"full_page" jsonschema:"capture the full page instead of only the viewport"`
+	FullPage bool `json:"full_page,omitempty" jsonschema:"capture the full page instead of only the viewport"`
 }
 
 type BrowserOutput struct {
@@ -111,6 +112,8 @@ type BrowserSession struct {
 	mu          sync.Mutex
 	ctx         context.Context
 	cancel      context.CancelFunc
+	cmd         *exec.Cmd
+	cmdDone     chan struct{}
 	started     bool
 	headless    bool
 	chromePath  string
@@ -134,18 +137,45 @@ func (s *BrowserSession) stopLocked() {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Signal(syscall.SIGTERM)
+	}
 	s.ctx = nil
 	s.cancel = nil
+	s.cmd = nil
+	s.cmdDone = nil
 	s.started = false
 }
 
 func (s *BrowserSession) stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.stopLocked()
+	cancel := s.cancel
+	cmd := s.cmd
+	done := s.cmdDone
+	s.ctx = nil
+	s.cancel = nil
+	s.cmd = nil
+	s.cmdDone = nil
+	s.started = false
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		if done != nil {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		}
+	}
 }
 
-func (s *BrowserSession) startLocked(parent context.Context, input StartInput) (string, error) {
+func (s *BrowserSession) startLocked(input StartInput) (string, error) {
 	s.stopLocked()
 
 	if input.WindowWidth > 0 {
@@ -169,7 +199,7 @@ func (s *BrowserSession) startLocked(parent context.Context, input StartInput) (
 	s.headless = input.Headless
 
 	if s.attachURL != "" {
-		return s.attachToDebugURL(parent, s.attachURL)
+		return s.attachToDebugURL(s.attachURL)
 	}
 
 	if s.userDataDir == "" {
@@ -177,22 +207,22 @@ func (s *BrowserSession) startLocked(parent context.Context, input StartInput) (
 	}
 
 	debugURL := fmt.Sprintf("http://127.0.0.1:%d", s.debugPort)
-	if s.debugEndpointReady(parent, debugURL) {
-		return s.attachToDebugURL(parent, debugURL)
+	if s.debugEndpointReady(debugURL) {
+		return s.attachToDebugURL(debugURL)
 	}
 
-	if err := s.launchVisibleChrome(parent); err != nil {
+	if err := s.launchVisibleChrome(); err != nil {
 		return "", err
 	}
-	if err := activateChrome(parent); err != nil {
+	if err := activateChrome(); err != nil {
 		return "", err
 	}
 
-	return s.attachToDebugURL(parent, debugURL)
+	return s.attachToDebugURL(debugURL)
 }
 
-func (s *BrowserSession) attachToDebugURL(parent context.Context, debugURL string) (string, error) {
-	allocCtx, allocCancel := chromedp.NewRemoteAllocator(parent, debugURL)
+func (s *BrowserSession) attachToDebugURL(debugURL string) (string, error) {
+	allocCtx, allocCancel := chromedp.NewRemoteAllocator(context.Background(), debugURL)
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	var readyState string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.readyState`, &readyState)); err != nil {
@@ -215,7 +245,7 @@ func chromeBinaryPath() string {
 	return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 }
 
-func (s *BrowserSession) launchVisibleChrome(parent context.Context) error {
+func (s *BrowserSession) launchVisibleChrome() error {
 	if s.chromePath == "" {
 		s.chromePath = chromeBinaryPath()
 	}
@@ -231,18 +261,22 @@ func (s *BrowserSession) launchVisibleChrome(parent context.Context) error {
 		"--new-window",
 		"about:blank",
 	}
-	cmd := exec.CommandContext(parent, s.chromePath, args...)
+	cmd := exec.Command(s.chromePath, args...)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("launch chrome: %w", err)
 	}
+	s.cmd = cmd
+	done := make(chan struct{})
+	s.cmdDone = done
 	go func() {
 		_ = cmd.Wait()
+		close(done)
 	}()
 
 	deadline := time.Now().Add(30 * time.Second)
 	probeURL := fmt.Sprintf("http://127.0.0.1:%d/json/version", s.debugPort)
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequestWithContext(parent, http.MethodGet, probeURL, nil)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, probeURL, nil)
 		if err == nil {
 			resp, err := http.DefaultClient.Do(req)
 			if err == nil && resp.StatusCode == http.StatusOK {
@@ -259,9 +293,9 @@ func (s *BrowserSession) launchVisibleChrome(parent context.Context) error {
 	return fmt.Errorf("chrome debug endpoint did not become ready at %s", probeURL)
 }
 
-func (s *BrowserSession) debugEndpointReady(parent context.Context, debugURL string) bool {
+func (s *BrowserSession) debugEndpointReady(debugURL string) bool {
 	probeURL := debugURL + "/json/version"
-	req, err := http.NewRequestWithContext(parent, http.MethodGet, probeURL, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, probeURL, nil)
 	if err != nil {
 		return false
 	}
@@ -273,21 +307,21 @@ func (s *BrowserSession) debugEndpointReady(parent context.Context, debugURL str
 	return resp.StatusCode == http.StatusOK
 }
 
-func activateChrome(parent context.Context) error {
-	cmd := exec.CommandContext(parent, "osascript", "-e", `tell application "Google Chrome" to activate`)
+func activateChrome() error {
+	cmd := exec.Command("osascript", "-e", `tell application "Google Chrome" to activate`)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("activate chrome: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
-func (s *BrowserSession) ensureStarted(parent context.Context) (string, error) {
+func (s *BrowserSession) ensureStarted() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.started {
 		return fmt.Sprintf("http://127.0.0.1:%d", s.debugPort), nil
 	}
-	return s.startLocked(parent, StartInput{})
+	return s.startLocked(StartInput{})
 }
 
 func shouldRestartBrowser(err error) bool {
@@ -300,7 +334,7 @@ func shouldRestartBrowser(err error) bool {
 }
 
 func (s *BrowserSession) run(parent context.Context, timeout time.Duration, actions ...chromedp.Action) error {
-	_, err := s.ensureStarted(parent)
+	_, err := s.ensureStarted()
 	if err != nil {
 		return fmt.Errorf("start browser: %w", err)
 	}
@@ -322,7 +356,7 @@ func (s *BrowserSession) run(parent context.Context, timeout time.Duration, acti
 	if err := chromedp.Run(actionCtx, actions...); err != nil {
 		if shouldRestartBrowser(err) {
 			s.stop()
-			if _, startErr := s.ensureStarted(parent); startErr == nil {
+			if _, startErr := s.ensureStarted(); startErr == nil {
 				s.mu.Lock()
 				ctx = s.ctx
 				s.mu.Unlock()
@@ -371,10 +405,12 @@ func (s *BrowserSession) pageText(parent context.Context, maxChars int) (string,
 var browser = newBrowserSession()
 
 func startBrowser(ctx context.Context, _ *mcp.CallToolRequest, input StartInput) (*mcp.CallToolResult, StartOutput, error) {
+	browser.stop()
+
 	browser.mu.Lock()
 	defer browser.mu.Unlock()
 
-	debugURL, err := browser.startLocked(ctx, input)
+	debugURL, err := browser.startLocked(input)
 	if err != nil {
 		return nil, StartOutput{Started: false, Message: err.Error()}, err
 	}
@@ -390,7 +426,7 @@ func navigate(ctx context.Context, _ *mcp.CallToolRequest, input NavigateInput) 
 	if err := browser.run(ctx, 30*time.Second, chromedp.Navigate(input.URL)); err != nil {
 		return nil, NavigateOutput{URL: input.URL, Message: err.Error()}, err
 	}
-	if err := activateChrome(ctx); err != nil {
+	if err := activateChrome(); err != nil {
 		return nil, NavigateOutput{URL: input.URL, Message: err.Error()}, err
 	}
 
@@ -475,7 +511,7 @@ func searchBrowser(ctx context.Context, _ *mcp.CallToolRequest, input SearchInpu
 	if err := browser.run(ctx, 30*time.Second, chromedp.Navigate(target)); err != nil {
 		return nil, NavigateOutput{URL: target, Message: err.Error()}, err
 	}
-	if err := activateChrome(ctx); err != nil {
+	if err := activateChrome(); err != nil {
 		return nil, NavigateOutput{URL: target, Message: err.Error()}, err
 	}
 
@@ -491,7 +527,7 @@ func openURL(ctx context.Context, _ *mcp.CallToolRequest, input OpenInput) (*mcp
 	if err := browser.run(ctx, 30*time.Second, chromedp.Navigate(input.URL)); err != nil {
 		return nil, OpenOutput{URL: input.URL, Message: err.Error()}, err
 	}
-	if err := activateChrome(ctx); err != nil {
+	if err := activateChrome(); err != nil {
 		return nil, OpenOutput{URL: input.URL, Message: err.Error()}, err
 	}
 
@@ -535,13 +571,20 @@ func stopBrowser(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.
 
 func status(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, BrowserOutput, error) {
 	browser.mu.Lock()
-	defer browser.mu.Unlock()
+	started := browser.started
+	debugPort := browser.debugPort
+	browser.mu.Unlock()
 
-	if !browser.started {
+	if !started {
 		return nil, BrowserOutput{Message: "browser is not running"}, nil
 	}
 
-	return nil, BrowserOutput{Message: fmt.Sprintf("browser running at http://127.0.0.1:%d", browser.debugPort)}, nil
+	debugURL := fmt.Sprintf("http://127.0.0.1:%d", debugPort)
+	if !browser.debugEndpointReady(debugURL) {
+		return nil, BrowserOutput{Message: "browser is not running (debug endpoint not responding)"}, nil
+	}
+
+	return nil, BrowserOutput{Message: fmt.Sprintf("browser running at %s", debugURL)}, nil
 }
 
 func main() {
@@ -563,6 +606,7 @@ func main() {
 	mcp.AddTool(server, &mcp.Tool{Name: "browser_status", Description: "report whether the managed browser is running"}, status)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, "server stopped:", err)
+		os.Exit(1)
 	}
 }
